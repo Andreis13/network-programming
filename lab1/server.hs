@@ -1,25 +1,66 @@
-import Network.Socket
+{-# LANGUAGE OverloadedStrings #-}
+
+
+import Network.Socket hiding (send, sendTo, recv, recvFrom)
+import Network.Socket.ByteString
 import Control.Monad
 import Control.Concurrent
-import qualified Data.Map as Map
+import qualified Data.ByteString.Char8 as BS
 import Data.Maybe
 import Data.List
+import Data.Time
+import Data.Time.Format
+import System.Locale
 
 
-main = do
+main = withSocketsDo $ do
     server <- socket AF_INET Stream defaultProtocol
+
+    --if isSupportedSocketOption ReuseAddr
+    --    then
+    --    else return ()
+
+    setSocketOption server ReuseAddr 0
+
+
     address <- inet_addr "127.0.0.1"
     bindSocket server $ SockAddrInet 4321 address
     listen server 5
-    forever $ runServer server
+
+    shutdownFlagMVar <- newMVar False
+    connMVar         <- newEmptyMVar
+
+    connectorTID <- forkIO $ acceptConnections server connMVar
+    runServer server [] connMVar shutdownFlagMVar
+    killThread connectorTID
 
 
-runServer server = do
+acceptConnections server connMVar = do
     conn <- accept server
-    putStr "Connection accepted from "
-    addrToStr (snd conn) >>= putStrLn
-    let (SockAddrInet port host) = snd conn
-    forkIO $ forever $ processConnection conn
+    putMVar connMVar conn
+    acceptConnections server connMVar
+
+
+runServer server connThreads newConnMVar shutdownFlagMVar = do
+    shutdownFlag <- readMVar shutdownFlagMVar
+    if shutdownFlag
+        then do
+            putStrLn $ show connThreads
+            shutdownServer connThreads
+        else do
+            c <- tryTakeMVar newConnMVar
+            case c of
+                Nothing -> runServer server connThreads newConnMVar shutdownFlagMVar
+                Just conn@(client, clientAddr) -> do
+                    putStr "Connection accepted from "
+                    addrToStr clientAddr >>= putStrLn
+                    tid <- forkIO $ forever $ processConnection conn shutdownFlagMVar
+                    putStrLn $ show tid
+                    runServer server ((tid, conn):connThreads) newConnMVar shutdownFlagMVar
+
+
+shutdownServer = mapM_ (\(tid, (sock, _)) -> shutdown sock ShutdownBoth >> killThread tid)
+
 
 
 addrToStr (SockAddrInet port host) = do
@@ -27,32 +68,39 @@ addrToStr (SockAddrInet port host) = do
     return $ h ++ ":" ++ show port
 
 
-processConnection (client, clientAddr) = do
+processConnection (client, clientAddr) shutdownFlagMVar = do
     message <- recv client 256
-    case words message of
+    case BS.words message of
         []             -> return 0
         (command:args) -> do
-            case Map.lookup command handlers of
-                Nothing        -> send client "Command not found"
-                (Just handler) -> handler args >>= send client
+            result <- case command of
+                "add"          -> adder args
+                "mul"          -> multiplier args
+                "reverse"      -> reverser args
+                "ping"         -> return "pong"
+                "tellmeastory" -> tellmeastory
+                "hastalavista" -> swapMVar shutdownFlagMVar True >> return ""
+                "time"         -> getTime
+                "showtime"     -> getT2
+                otherwise      -> if BS.last command == '?'
+                                    then return "42"
+                                    else return "Can you elaborate on that?"
+            send client result
 
 
-handlers = Map.fromList [
-        ("add", adder),
-        ("mul", multiplier),
-        ("reverse", reverser),
-        ("ping", ping),
-        ("tellmeastory", tellmeastory)
-    ]
+getT2 = BS.readFile "Terminator2.jpg"
 
+getTime = do
+    tz <- getCurrentTimeZone
+    utcTime <- getCurrentTime
+    let localTime = utcToLocalTime tz utcTime
+    return $ BS.pack $ formatTime defaultTimeLocale "%H:%M:%S" localTime
 
-adder args = return $ show $ sum $ map read args
+adder args = return $ BS.pack $ show $ sum $ map (read . BS.unpack) args
 
-multiplier args = return $ show $ product $ map read args
+multiplier args = return $ BS.pack $ show $ product $ map (read . BS.unpack) args
 
-reverser args = return $ reverse (intercalate " " args)
+reverser args = return $ BS.reverse (BS.intercalate " " args)
 
-ping _ = return "pong"
-
-tellmeastory _ = putStr "waiting for input -> " >> getLine
+tellmeastory = putStr "waiting for input -> " >> BS.getLine
 

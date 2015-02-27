@@ -62,7 +62,6 @@ initConvert videoId = do
 getConvertStatus videoId = do
     let uri = auderioUri "/check-download" ("?id=" ++ videoId)
     response <- get uri jsonHeaders
-    print response
     (return . decode . body) response :: IO (Maybe ConvertStatus)
 
 
@@ -70,6 +69,5 @@ getConvertStatus videoId = do
 getDownloadLink videoId = do
     let uri = auderioUri "/get-cloud-link" ("?id=" ++ videoId)
     response <- get uri jsonHeaders
-    print response
     (return . decode . body) response :: IO (Maybe DownloadLink)
 

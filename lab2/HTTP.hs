@@ -25,7 +25,6 @@ import Network.Socket.ByteString.Lazy
 import Network.URI
 import OpenSSL
 import qualified OpenSSL.Session as SSL
-import qualified Network.TLS as TLS
 import "crypto-random" Crypto.Random
 import Prelude hiding (take, takeWhile)
 import System.IO ( IOMode(..) )
@@ -105,16 +104,6 @@ lazyRead ssl = do
         else lazyRead ssl >>= (return . (bs:))
     where handler :: SSL.ConnectionAbruptlyTerminated -> IO BSS.ByteString
           handler e = return ""
-
-
-
-processRequestSocketTLS host port request = do
-    sock <- openSocketStream host port
-    ep <- createEntropyPool
-    context <- TLS.contextNew sock (TLS.defaultParamsClient host "") (cprgCreate ep :: SystemRNG)
-    TLS.handshake context
-    TLS.sendData context request
-    TLS.recvData context >>= (return . BS.fromStrict)
 
 
 

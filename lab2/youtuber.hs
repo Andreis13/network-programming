@@ -2,14 +2,15 @@
 
 {-# LANGUAGE OverloadedStrings, DeriveGeneric #-}
 
-import Control.Arrow
-import Data.Aeson
-import Data.Maybe
+import           Auderio
+import           Control.Arrow
+import           Data.Aeson
+import           Data.Maybe
 import qualified Data.ByteString.Lazy.Char8 as BS
-import Network.URI
-import HTTP
+import           Network.URI
+import           HTTP
 
-import GHC.Generics
+import           GHC.Generics
 
 
 
@@ -38,51 +39,45 @@ data SearchResponse = SearchResponse {
 
 instance FromJSON SearchResponse
 
-data Y2MP3 = Y2MP3 {
-    link :: String
-} deriving (Show, Generic)
-
-instance FromJSON Y2MP3
-
 
 
 main :: IO ()
 main = do
-    let h = [("", "")
-            ,("", "")]
-    let uri = fromJust $ parseURI $ searchQuery "disturbed haunted"
+
+    putStrLn "Enter the title of a song:"
+    sq <- getLine
+
+    let uri = fromJust $ parseURI $ searchQuery sq
     contents <- get uri []
-
-    BS.writeFile "test.html" $ HTTP.body contents
-    putStrLn $ show . BS.length $ HTTP.body contents
-    putStrLn $ show $ HTTP.status contents
-    printHeaders $ HTTP.headers contents
-
 
     let searchResponse = decode $ HTTP.body contents :: Maybe SearchResponse
         items = extractItems searchResponse
 
     displayOptions items
-
+    putStrLn "Choose one variant to download as mp3"
     selection <- getLine >>= return . read
 
+    let (videoId, videoTitle) = items !! selection
 
-    let videoId = fst $ items !! selection
-        yt2mp3url = "http://youtubeinmp3.com/fetch/?api=advanced&format=JSON&video=http://www.youtube.com/watch?v="
+    initConvert videoId
+    checkStatus videoId
+    maybeResp <- getDownloadLink videoId
 
-        convertUri = fromJust $ parseURI $ yt2mp3url ++ videoId
+    let link = cloud_url (fromJust maybeResp)
+    file <- get (fromJust (parseURI link)) []
+    BS.writeFile (videoTitle ++ ".mp3") $ HTTP.body file
+    putStrLn "Downloaded!"
 
 
-    convertResponse <- get convertUri []
-    print convertResponse
 
-    let downloadInfo = decode $ HTTP.body convertResponse :: Maybe Y2MP3
-        downloadUri = fromJust . parseURI . link . fromJust $ downloadInfo
-
-    file <- get downloadUri []
-    BS.writeFile "test.mp3" $ HTTP.body file
-    putStrLn $ show $ HTTP.status contents
-    printHeaders $ HTTP.headers file
+checkStatus videoId = do
+    maybeResp <- getConvertStatus videoId
+    let resp = fromJust maybeResp
+        success = putStrLn "Converted" >> return ()
+    case convert_status resp of
+        "ready" -> success
+        "downloaded" -> success
+        otherwise -> putStrLn (convert_status resp ++ " -> " ++ (show . fromJust . progress) resp) >> checkStatus videoId
 
 
 searchQuery searchString = path ++ qstring ++ key

@@ -4,14 +4,16 @@
 module Main where
 
 import           Control.Arrow
+import           Control.Applicative
 import           Control.Concurrent
 import           Control.Concurrent.STM.TChan
 import           Control.Monad
 import           Control.Monad.STM
-import           Data.Attoparsec.ByteString.Char8 hiding (parse, takeTill, skipWhile, Done, Fail)
-import           Data.Attoparsec.ByteString.Lazy
+import           Data.Attoparsec.ByteString.Char8 hiding (parse, takeTill, takeWhile, skipWhile, Done, Fail)
+import           Data.Attoparsec.ByteString.Lazy hiding (takeWhile)
 import qualified Data.ByteString.Lazy.Char8 as BS
 import qualified Data.Map as M
+import           Data.Maybe
 import           Data.UUID
 import           Data.UUID.V4
 import           GHC.Float
@@ -29,7 +31,7 @@ data SharedEvent = DrawPath { pathId::Int, point::Point } | Bye deriving Show
 
 data Net a b = Net { sendMsg::a, recvMsg::b }
 
-type Peers = M.Map UUID Path
+type Peers = M.Map UUID (Color, M.Map Int Path)
 
 
 data World a = World { keyPressed :: Bool
@@ -77,50 +79,76 @@ main = withSocketsDo $ do
             (World False initialPeers netFuncs [0..] initialColors)
             render
             handleInput
-            update
+            update'
 
 
 initialPeers = M.empty :: Peers
 
-initialColors = cycle [red, green, blue, yellow, cyan, magenta, rose, violet, azure, aquamarine, chartreuse, orange]
+initialColors = cycle [black, red, green, blue, yellow, cyan, magenta, rose, violet, azure, aquamarine, chartreuse, orange]
 
 
-render w = return $ pictures $ map line $ M.elems (peers w)
+render w = return $ pictures $ map drawPeer $ M.elems (peers w)
+    where drawPeer = (\(c, paths) -> color c $ pictures $ map line $ M.elems paths)
 
 
 --handleInput (EventMotion _) w@(_, [], _) = return w
-handleInput (EventMotion (x, y)) w@(World keyPressed _ net _ _) = do
-    when keyPressed $ void $ sendMsg net $ DrawPath 0 (x, y)
-    return w
+handleInput (EventMotion (x, y)) w@(World keyPressed peers net ids colors) = do
+    when keyPressed $ void $ sendMsg net $ DrawPath (head ids) (x, y)
+    return $ World keyPressed peers net ids colors
 
-handleInput (EventKey key keyState mod (x, y)) (World _ peers net i c) = do
-    return $ World (keyState == Down) peers net i c
+handleInput (EventKey key keyState mod (x, y)) (World _ peers net ids c) = do
+    return $ World (keyState == Down) peers net (tail ids) c
 
 handleInput (EventResize (x, y)) w = do
     return w
 
-update t (World keyPressed peers' net i c) = do
-    let updatePeers = (\peers -> do
-            maybeMsg <- recvMsg net
-            case maybeMsg of
-                Nothing -> return peers
-                Just m -> do
-                    msg <- case parse message m of
-                                Fail _ _ errMsg -> putStrLn errMsg >> error errMsg
-                                Done _ s -> return s
+--update t (World keyPressed peers' net i c) = do
+--    let updatePeers = (\peers -> do
+--            maybeMsg <- recvMsg net
+--            case maybeMsg of
+--                Nothing -> return peers
+--                Just m -> do
+--                    msg <- case parse message m of
+--                                Fail _ _ errMsg -> putStrLn errMsg >> error errMsg
+--                                Done _ s -> return s
 
-                    newPeers <- case what msg of
-                                    DrawPath pathId point -> do
-                                        return $ addPointToPeer point (who msg) peers
-                                    Bye -> do return $ removePeer (who msg) peers
+--                    newPeers <- case what msg of
+--                                    DrawPath pathId point -> do
+--                                        return $ addPointToPeer point (who msg) peers
+--                                    Bye -> do return $ removePeer (who msg) peers
 
-                    updatePeers newPeers)
+--                    updatePeers newPeers)
 
-    newPeers <- updatePeers peers'
-    return $ World keyPressed newPeers net i c
+update' t (World keyPressed peers' net i c) = do
+    let recvAll = do
+            m <- recvMsg net
+            case m of
+                Nothing -> return []
+                Just msg -> recvAll >>= return . (msg:)
 
+    messages <- map (\m -> case parse message m of
+                                Fail _ _ errMsg -> error errMsg
+                                Done _ s -> s) <$> recvAll
 
-addPointToPeer point uuid peers = M.insertWith' (\[p] ps -> p:ps) uuid [point] peers
+    let (newPeers, newColors) =
+            foldl (\(peers, colors) msg ->
+                    let uuid = who msg
+                    in  case what msg of
+                            DrawPath pathId point ->
+                                if uuid `M.member` peers
+                                    then (addPointToPeer point pathId uuid peers, colors)
+                                    else (addPointToNewPeer point pathId uuid (head colors) peers, tail colors)
+                            Bye -> (removePeer uuid peers, colors)
+                        ) (peers', c) messages
+
+    return $ World keyPressed newPeers net i newColors
+
+addPointToNewPeer point pathId uuid color =
+    M.insert uuid (color, M.singleton pathId [point])
+
+addPointToPeer point pathId =
+    M.adjust (\(color, paths) ->
+        (color, M.insertWith' (\[p] ps -> p:ps) pathId [point] paths))
 
 removePeer = M.delete
 

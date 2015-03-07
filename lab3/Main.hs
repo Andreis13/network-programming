@@ -6,6 +6,7 @@ module Main where
 import           Control.Arrow
 import           Control.Concurrent
 import           Control.Concurrent.STM.TChan
+import           Control.Monad
 import           Control.Monad.STM
 import           Data.Attoparsec.ByteString.Char8 hiding (parse, takeTill, skipWhile, Done, Fail)
 import           Data.Attoparsec.ByteString.Lazy
@@ -24,10 +25,23 @@ import           Prelude hiding (take)
 
 
 data Message = Message { who::UUID, what::SharedEvent } deriving Show
-data SharedEvent = DrawPath { point::Point } | StartPath | Bye deriving Show
+data SharedEvent = DrawPath { pathId::Int, point::Point } | Bye deriving Show
 
+data Net a b = Net { sendMsg::a, recvMsg::b }
 
 type Peers = M.Map UUID Path
+
+
+data World a = World { keyPressed :: Bool
+                     , peers      :: Peers
+                     , net        :: a
+                     , idPool     :: [Int]
+                     , colorPool  :: [Color]
+                     }
+
+
+
+nextId (x:xs) = (x, xs)
 
 
 message = do
@@ -44,56 +58,71 @@ sharedEvent = do
 drawPath = do
     string "DRAWPATH"
     skipSpace
+    id <- decimal
+    skipSpace
     x <- double
     skipSpace
     y <- double
-    return $ DrawPath (double2Float x, double2Float y)
+    return $ DrawPath id (double2Float x, double2Float y)
 
-serialize (DrawPath (x, y)) = BS.concat $ map BS.pack ["DRAWPATH ", show x, " ", show y]
+serialize (DrawPath id (x, y)) =
+    BS.concat $ map BS.pack ["DRAWPATH ", show id, " ", show x, " ", show y]
 
 
 main = withSocketsDo $ do
-    net <- initNetwork
+    netFuncs <- initNetwork
     playIO (InWindow "Lab3" (400, 400) (50, 50))
             white
             60
-            (False, [], net)
+            (World False initialPeers netFuncs [0..] initialColors)
             render
             handleInput
             update
 
 
+initialPeers = M.empty :: Peers
 
-render (_, paths, _) = return $ line paths
+initialColors = cycle [red, green, blue, yellow, cyan, magenta, rose, violet, azure, aquamarine, chartreuse, orange]
+
+
+render w = return $ pictures $ map line $ M.elems (peers w)
 
 
 --handleInput (EventMotion _) w@(_, [], _) = return w
-handleInput (EventMotion (x, y)) w@(keyPressed, _, net@(sendMsg, _)) = do
-    if keyPressed
-        then sendMsg $ DrawPath (x, y)
-        else return 0
+handleInput (EventMotion (x, y)) w@(World keyPressed _ net _ _) = do
+    when keyPressed $ void $ sendMsg net $ DrawPath 0 (x, y)
     return w
 
-handleInput (EventKey key keyState mod (x, y)) w@(_, paths, net) = do
-    return $ if keyState == Down then (True, paths, net) else (False, paths, net)
+handleInput (EventKey key keyState mod (x, y)) (World _ peers net i c) = do
+    return $ World (keyState == Down) peers net i c
 
 handleInput (EventResize (x, y)) w = do
     return w
 
-update t w@(keyPressed, paths, net@(_, recvMsg)) = do
-    let updatePaths = (\ps -> do
-            maybeMsg <- recvMsg
+update t (World keyPressed peers' net i c) = do
+    let updatePeers = (\peers -> do
+            maybeMsg <- recvMsg net
             case maybeMsg of
-                Nothing -> return ps
+                Nothing -> return peers
                 Just m -> do
                     msg <- case parse message m of
                                 Fail _ _ errMsg -> putStrLn errMsg >> error errMsg
                                 Done _ s -> return s
-                    let p = point $ what msg
-                    updatePaths (p:ps))
-    newPaths <- updatePaths paths
-    return (keyPressed, newPaths, net)
 
+                    newPeers <- case what msg of
+                                    DrawPath pathId point -> do
+                                        return $ addPointToPeer point (who msg) peers
+                                    Bye -> do return $ removePeer (who msg) peers
+
+                    updatePeers newPeers)
+
+    newPeers <- updatePeers peers'
+    return $ World keyPressed newPeers net i c
+
+
+addPointToPeer point uuid peers = M.insertWith' (\[p] ps -> p:ps) uuid [point] peers
+
+removePeer = M.delete
 
 
 
@@ -108,10 +137,8 @@ initNetwork = do
 
     addrInfos <- getAddrInfo (Just defaultHints) (Just "255.255.255.255") (Just "3000")
     let addr = addrAddress $ head addrInfos
-        sendMsg = (\msg -> do
-            let s =( (uuidBytes `BS.append` (serialize msg)))
-            --BS.putStrLn s
-            sendTo sender (BS.toStrict s) addr)
+        sendMsg = (\msg -> let bytes = uuidBytes `BS.append` (serialize msg)
+                           in sendTo sender (BS.toStrict bytes) addr)
 
     listener <- socket AF_INET Datagram defaultProtocol
     setSocketOption listener ReuseAddr 1
@@ -129,6 +156,6 @@ initNetwork = do
 
     let recvMsg = atomically $ tryReadTChan incomingChan
 
-    return (sendMsg, recvMsg)
+    return $ Net sendMsg recvMsg
 
 

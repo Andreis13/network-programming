@@ -210,25 +210,21 @@ initNetwork = do
     uuid <- nextRandom
     let uuidBytes = toByteString uuid
 
-    sender <- socket AF_INET Datagram defaultProtocol
-    setSocketOption sender ReuseAddr 1
-    setSocketOption sender ReusePort 1
-    setSocketOption sender Broadcast 1
+    sock <- socket AF_INET Datagram defaultProtocol
+    setSocketOption sock ReuseAddr 1
+    setSocketOption sock ReusePort 1
+    setSocketOption sock Broadcast 1
+    bind sock (SockAddrInet 3000 iNADDR_ANY)
 
     addrInfos <- getAddrInfo (Just defaultHints) (Just "255.255.255.255") (Just "3000")
     let addr = addrAddress $ head addrInfos
         sendMsg = (\msg -> let bytes = uuidBytes `BS.append` (serialize msg)
-                           in sendTo sender (BS.toStrict bytes) addr)
-
-    listener <- socket AF_INET Datagram defaultProtocol
-    setSocketOption listener ReuseAddr 1
-    setSocketOption listener ReusePort 1
-    bind listener (SockAddrInet 3000 iNADDR_ANY)
+                           in sendTo sock (BS.toStrict bytes) addr)
 
     incomingChan <- newTChanIO
 
     let receiver = do
-            msg <- recv listener 1024
+            msg <- recv sock 1024
             atomically $ writeTChan incomingChan msg
             receiver
 
